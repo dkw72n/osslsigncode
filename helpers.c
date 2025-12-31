@@ -223,6 +223,7 @@ PKCS7 *pkcs7_create(FILE_FORMAT_CTX *ctx)
     }
     /* add sorted certificate chain */
     for (i=0; i<sk_X509_num(chain); i++) {
+        printf("[-] adding from sorted chain: %d\n", i);
         (void)PKCS7_add_certificate(p7, sk_X509_value(chain, i));
     }
     /* add crls */
@@ -744,24 +745,40 @@ static STACK_OF(X509) *X509_chain_get_sorted(FILE_FORMAT_CTX *ctx, int signer)
         sk_X509_free(chain);
         return NULL;
     }
-    /* add the certificate chain */
-    for (i=0; i<sk_X509_num(ctx->options->certs); i++) {
-        if (i == signer)
-            continue;
-        if (!sk_X509_push(chain, sk_X509_value(ctx->options->certs, i))) {
-            sk_X509_free(chain);
-            return NULL;
-        }
-    }
+
+    int n_xcerts = sk_X509_num(ctx->options->xcerts);
+    // printf("[-] push cert: %d --\n", signer);
     /* add all cross certificates */
     if (ctx->options->xcerts) {
-        for (i=0; i<sk_X509_num(ctx->options->xcerts); i++) {
+        for (i=0; i<n_xcerts; i++) {
             if (!sk_X509_push(chain, sk_X509_value(ctx->options->xcerts, i))) {
                 sk_X509_free(chain);
                 return NULL;
             }
+            // printf("[-] push xcert: %d\n", i);
         }
     }
+
+    /* add the certificate chain */
+    for (i=0; i<sk_X509_num(ctx->options->certs); i++) {
+        if (i == signer)
+            continue;
+        X509 *cert = sk_X509_value(ctx->options->certs, i);
+        // printf("[-] cert = %p\n", cert);
+        if (n_xcerts){
+            /* remove self-signed cert when xcert present */
+            if (X509_check_issued(cert, cert) == X509_V_OK) {
+                // printf("[-] skip self-sign cert %d\n", i);
+                continue;
+            }
+        }
+        if (!sk_X509_push(chain, cert)) {
+            sk_X509_free(chain);
+            return NULL;
+        }
+        // printf("[-] push cert: %d\n", i);
+    }
+    
     /* sort certificate chain using the supplied comparison function */
     sk_X509_sort(chain);
     /* remove duplicates */
