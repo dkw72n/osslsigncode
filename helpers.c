@@ -765,10 +765,19 @@ static STACK_OF(X509) *X509_chain_get_sorted(FILE_FORMAT_CTX *ctx, int signer)
             continue;
         X509 *cert = sk_X509_value(ctx->options->certs, i);
         // printf("[-] cert = %p\n", cert);
-        if (n_xcerts){
-            /* remove self-signed cert when xcert present */
-            if (X509_check_issued(cert, cert) == X509_V_OK) {
-                // printf("[-] skip self-sign cert %d\n", i);
+        if (n_xcerts) {
+            int skip_cert = 0;
+            /* check if this cert has the same subject as any cross certificate */
+            for (int j = 0; j < n_xcerts; j++) {
+                X509 *xcert = sk_X509_value(ctx->options->xcerts, j);
+                /* if cert has the same subject as a cross certificate, skip it */
+                if (X509_NAME_cmp(X509_get_subject_name(cert), X509_get_subject_name(xcert)) == 0) {
+                    // printf("[-] skip cert %d, same subject as cross cert %d\n", i, j);
+                    skip_cert = 1;
+                    break;
+                }
+            }
+            if (skip_cert) {
                 continue;
             }
         }
