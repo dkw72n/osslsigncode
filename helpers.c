@@ -738,54 +738,73 @@ static int pkcs7_signer_info_add_sequence_number(PKCS7_SIGNER_INFO *si, FILE_FOR
  */
 static STACK_OF(X509) *X509_chain_get_sorted(FILE_FORMAT_CTX *ctx, int signer)
 {
-    int i;
     STACK_OF(X509) *chain = sk_X509_new(X509_compare);
+    int added = 1;
 
     if (signer != -1 && !sk_X509_push(chain, sk_X509_value(ctx->options->certs, signer))) {
         sk_X509_free(chain);
         return NULL;
     }
 
-    int n_xcerts = sk_X509_num(ctx->options->xcerts);
-    // printf("[-] push cert: %d --\n", signer);
-    /* add all cross certificates */
-    if (ctx->options->xcerts) {
-        for (i=0; i<n_xcerts; i++) {
-            if (!sk_X509_push(chain, sk_X509_value(ctx->options->xcerts, i))) {
-                sk_X509_free(chain);
-                return NULL;
-            }
-            // printf("[-] push xcert: %d\n", i);
-        }
-    }
+    while (added) {
+        X509 *subject = sk_X509_value(chain, sk_X509_num(chain) - 1);
+        X509 *issuer = NULL;
+        int i;
 
-    /* add the certificate chain */
-    for (i=0; i<sk_X509_num(ctx->options->certs); i++) {
-        if (i == signer)
-            continue;
-        X509 *cert = sk_X509_value(ctx->options->certs, i);
-        // printf("[-] cert = %p\n", cert);
-        if (n_xcerts) {
-            int skip_cert = 0;
-            /* check if this cert has the same subject as any cross certificate */
-            for (int j = 0; j < n_xcerts; j++) {
-                X509 *xcert = sk_X509_value(ctx->options->xcerts, j);
-                /* if cert has the same subject as a cross certificate, skip it */
-                if (X509_NAME_cmp(X509_get_subject_name(cert), X509_get_subject_name(xcert)) == 0) {
-                    // printf("[-] skip cert %d, same subject as cross cert %d\n", i, j);
-                    skip_cert = 1;
+        added = 0;
+
+        /* search in xcerts */
+        if (ctx->options->xcerts) {
+            for (i = 0; i < sk_X509_num(ctx->options->xcerts); i++) {
+                X509 *candidate = sk_X509_value(ctx->options->xcerts, i);
+                if (X509_check_issued(candidate, subject) == X509_V_OK) {
+                    EVP_PKEY *pkey = X509_get_pubkey(candidate);
+                    if (pkey) {
+                        int ret = X509_verify(subject, pkey);
+                        EVP_PKEY_free(pkey);
+                        if (ret == 1) {
+                            issuer = candidate;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* search in certs */
+        if (!issuer && ctx->options->certs) {
+            for (i = 0; i < sk_X509_num(ctx->options->certs); i++) {
+                X509 *candidate = sk_X509_value(ctx->options->certs, i);
+                if (X509_check_issued(candidate, subject) == X509_V_OK) {
+                    EVP_PKEY *pkey = X509_get_pubkey(candidate);
+                    if (pkey) {
+                        int ret = X509_verify(subject, pkey);
+                        EVP_PKEY_free(pkey);
+                        if (ret == 1) {
+                            issuer = candidate;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (issuer) {
+            int k, exists = 0;
+            for (k = 0; k < sk_X509_num(chain); k++) {
+                if (!X509_cmp(sk_X509_value(chain, k), issuer)) {
+                    exists = 1;
                     break;
                 }
             }
-            if (skip_cert) {
-                continue;
+            if (!exists) {
+                if (!sk_X509_push(chain, issuer)) {
+                    sk_X509_free(chain);
+                    return NULL;
+                }
+                added = 1;
             }
         }
-        if (!sk_X509_push(chain, cert)) {
-            sk_X509_free(chain);
-            return NULL;
-        }
-        // printf("[-] push cert: %d\n", i);
     }
     
     /* sort certificate chain using the supplied comparison function */

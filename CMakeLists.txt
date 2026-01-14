@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.17)
 # autodetect vcpkg CMAKE_TOOLCHAIN_FILE if VCPKG_ROOT is defined
 # this needs to be configured before the project() directive
 if((CMAKE_GENERATOR MATCHES "Ninja") AND DEFINED ENV{VCPKG_ROOT} AND NOT $ENV{VCPKG_ROOT} STREQUAL "" AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    set(VCPKG_TARGET_TRIPLET "x64-windows-static")
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
 endif((CMAKE_GENERATOR MATCHES "Ninja") AND DEFINED ENV{VCPKG_ROOT} AND NOT $ENV{VCPKG_ROOT} STREQUAL "" AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
 set(BUILTIN_SOCKET ON CACHE BOOL "") # for static Python
@@ -26,6 +27,14 @@ set(PACKAGE_BUGREPORT "Michal.Trojnara@stunnel.org")
 # specify the C standard
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+
+#Configure static linking
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+# set(OPENSSL_USE_STATIC_LIBS ON)
+# set(CURL_USE_STATIC_LIBS ON)
+# set(ZLIB_USE_STATIC_LIBS ON)
 
 # load CMake library modules
 include(FindOpenSSL)
@@ -71,7 +80,7 @@ target_link_libraries(osslsigncode PRIVATE ${OPENSSL_LIBRARIES})
 # set cURL includes/libraries
 if(OPENSSL_VERSION VERSION_LESS "3.0.0")
 if(CURL_FOUND)
-    target_compile_definitions(osslsigncode PRIVATE ENABLE_CURL=1)
+    target_compile_definitions(osslsigncode PRIVATE ENABLE_CURL=1 CURL_STATICLIB)
     target_include_directories(osslsigncode PRIVATE ${CURL_INCLUDE_DIRS})
     target_link_libraries(osslsigncode PRIVATE ${CURL_LIBRARIES})
     message(STATUS "cURL support enabled")

@@ -4003,7 +4003,7 @@ static int read_password(GLOBAL_OPTIONS *options)
 
     if (options->readpass) {
         if (!strcmp(options->readpass, "-")) {
-            passlen = (int)read(fileno(stdin), passbuf, sizeof(passbuf)-1);
+            // passlen = (int)read(fileno(stdin), passbuf, sizeof(passbuf)-1);
         } else {
 #ifdef WIN32
             HANDLE fhandle, fmap;
@@ -4751,6 +4751,8 @@ static int main_configure(int argc, char **argv, GLOBAL_OPTIONS *options)
                 return 0; /* FAILED */
             }
             options->provider = *(++argv);
+        } else if ((cmd == CMD_SIGN) && !strcmp(*argv, "-force")) {
+            options->force = 1;
         } else if ((cmd == CMD_SIGN) && !strcmp(*argv, "-nolegacy")) {
             options->legacy = 0;
 #endif /* OPENSSL_VERSION_NUMBER>=0x30000000L */
@@ -5020,7 +5022,7 @@ static int main_configure(int argc, char **argv, GLOBAL_OPTIONS *options)
             argc--;
         }
     }
-    if (cmd != CMD_VERIFY && file_exists(options->outfile)) {
+    if (cmd != CMD_VERIFY && file_exists(options->outfile) && !options->force) {
         fprintf(stderr, "Overwriting an existing file is not supported.\n");
         return 0; /* FAILED */
     }

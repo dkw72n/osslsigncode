@@ -322,6 +322,7 @@ typedef struct {
     char *tsa_keyfile;
     time_t tsa_time;
     int nested_number;
+    int force;
 } GLOBAL_OPTIONS;
 
 /*
