@@ -14,7 +14,9 @@ project(osslsigncode
     VERSION 2.10
     DESCRIPTION "OpenSSL based Authenticode signing for PE, CAB, CAT, MSI, APPX and script files"
     HOMEPAGE_URL "https://github.com/mtrojnar/osslsigncode"
-    LANGUAGES C)
+    LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
 
 # force nonstandard version format for development packages
 set(DEV "-dev")
@@ -103,6 +105,7 @@ endif(NOT UNIX)
 # add paths to linker search and installed rpath
 set_target_properties(osslsigncode PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
 
+add_subdirectory(utils)
 # testing with CTest
 include(CMakeTest)
 

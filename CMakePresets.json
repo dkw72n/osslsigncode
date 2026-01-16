@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "ninja_x64_rel",
+      "displayName": "Ninja (toolchain-msvc-linux)",
+      "description": "Use Ninja + custom msvc-linux toolchain",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "rel",
+      "configurePreset": "ninja_x64_rel"
+    }
+  ]
+}
