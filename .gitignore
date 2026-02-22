@@ -39,3 +39,6 @@ stamp-h1
 *.u
 *.rc
 *~
+*.exe
+
+test_certs/

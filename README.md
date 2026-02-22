@@ -201,6 +201,95 @@ and then choose the signature from the list, and click on
 Details. You should then be presented with a dialog that says
 amongst other things that "This digital signature is OK".
 
+## OFFLINE TIMESTAMPING WITH SELF-SIGNED TSA
+
+osslsigncode supports offline timestamping using a self-signed Time-Stamp Authority (TSA) certificate and private key, without requiring network access to an external TSA server.
+
+### Generating Self-Signed CA and TSA Certificates
+
+A helper script `misc/generate_tsa_certs.sh` is provided to generate the necessary certificates:
+
+```shell
+./misc/generate_tsa_certs.sh [output_directory]
+```
+
+Alternatively, you can generate them manually with OpenSSL:
+
+```shell
+# Generate self-signed Root CA
+openssl genrsa -out ca.key 2048
+openssl req -new -x509 -days 3650 -key ca.key -out ca.crt \
+  -subj "/C=US/ST=State/L=City/O=Organization/OU=Timestamping Authority/CN=My TSA Root CA"
+
+# Generate TSA private key
+openssl genrsa -out tsa.key 2048
+
+# Generate TSA certificate signing request
+openssl req -new -key tsa.key -out tsa.csr \
+  -subj "/C=US/ST=State/L=City/O=Organization/OU=Timestamping Authority/CN=My TSA"
+
+# Create extensions configuration file
+cat > tsa.ext <<EOF
+basicConstraints = critical,CA:FALSE
+extendedKeyUsage = critical,timeStamping
+keyUsage = digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+EOF
+
+# Sign TSA certificate with Root CA
+openssl x509 -req -days 3650 -in tsa.csr -CA ca.crt -CAkey ca.key \
+  -CAcreateserial -out tsa.crt -extfile tsa.ext
+
+# Create certificate chain
+cat tsa.crt ca.crt > tsa-chain.pem
+
+# Clean up temporary files
+rm -f tsa.csr tsa.ext ca.srl
+```
+
+### Signing with Offline Timestamp
+
+To sign a file with offline timestamping:
+
+```shell
+osslsigncode sign \
+  -certs your_cert.pem \
+  -key your_key.pem \
+  -n "Your Application" \
+  -i http://www.yourwebsite.com/ \
+  -TSA-certs tsa.crt \
+  -TSA-key tsa.key \
+  -in app.exe \
+  -out app_signed_timestamped.exe
+```
+
+### Adding Timestamp to Already-Signed File
+
+To add an offline timestamp to an already signed file:
+
+```shell
+osslsigncode add \
+  -TSA-certs tsa.crt \
+  -TSA-key tsa.key \
+  -in already_signed.exe \
+  -out timestamped.exe
+```
+
+### Verifying Offline Timestamp
+
+To verify a signature with offline timestamp, you need to provide the TSA's CA certificate:
+
+```shell
+osslsigncode verify -TSA-CAfile ca.crt signed.exe
+```
+
+### Important Notes
+
+- The TSA certificate must have the `timeStamping` extended key usage marked as critical.
+- For production use, consider using a properly managed PKI rather than self-signed certificates.
+- Keep the TSA private key secure, as it is used to sign timestamps.
+
 ## UNAUTHENTICATED BLOBS
 
 The "-addUnauthenticatedBlob" parameter adds a 1024-byte unauthenticated blob
