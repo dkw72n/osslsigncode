@@ -67,7 +67,7 @@
  * 2:d=1  hl=2 l=   2 prim:  BIT STRING
  * 6:d=1  hl=2 l=   0 cons:  SEQUENCE
 */
-const u_char java_attrs_low[] = {
+static const u_char java_attrs_low[] = {
     0x30, 0x06, 0x03, 0x02, 0x00, 0x01, 0x30, 0x00
 };
 
@@ -76,7 +76,7 @@ const u_char java_attrs_low[] = {
  * 0:d=0  hl=2 l=  12 cons: SEQUENCE
  * 2:d=1  hl=2 l=  10 prim:  OBJECT     :Microsoft Individual Code Signing
 */
-const u_char purpose_ind[] = {
+static const u_char purpose_ind[] = {
     0x30, 0x0c, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04,
     0x01, 0x82, 0x37, 0x02, 0x01, 0x15
 };
@@ -86,10 +86,12 @@ const u_char purpose_ind[] = {
  * 0:d=0  hl=2 l=  12 cons: SEQUENCE
  * 2:d=1  hl=2 l=  10 prim:  OBJECT     :Microsoft Commercial Code Signing
 */
-const u_char purpose_comm[] = {
+static const u_char purpose_comm[] = {
     0x30, 0x0c, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04,
     0x01, 0x82, 0x37, 0x02, 0x01, 0x16
 };
+
+static UI_METHOD *ui_method;
 
 /*
  * ASN.1 definitions (more or less from official MS Authenticode docs)
@@ -2524,17 +2526,14 @@ static int verify_authenticode(FILE_FORMAT_CTX *ctx, PKCS7 *p7, time_t time, X50
         if (!crlok)
             goto out;
     }
-    /*
-     * Verify that:
-     * - extendedKeyUsage, if present, permits codeSigning (RFC 5280 section 4.2.1.12)
-     * - keyUsage, if present, permits digitalSignature (RFC 5280 section 4.2.1.3)
-     */
-    if (!(X509_get_extended_key_usage(signer) & XKU_CODE_SIGN)) {
-        fprintf(stderr, "Signer certificate rejected: extendedKeyUsage does not permit codeSigning\n");
-        goto out;
-    }
+    /* keyUsage, if present, must permit digitalSignature (RFC 5280 section 4.2.1.3) */
     if (!(X509_get_key_usage(signer) & X509v3_KU_DIGITAL_SIGNATURE)) {
         fprintf(stderr, "Signer certificate rejected: keyUsage does not permit digitalSignature\n");
+        goto out;
+    }
+    /* extendedKeyUsage, if present, must permit codeSigning (RFC 5280 section 4.2.1.12) */
+    if (!(X509_get_extended_key_usage(signer) & XKU_CODE_SIGN)) {
+        fprintf(stderr, "Signer certificate rejected: extendedKeyUsage does not permit codeSigning\n");
         goto out;
     }
 
@@ -3085,13 +3084,8 @@ static int verify_content_member_digest(FILE_FORMAT_CTX *ctx, ASN1_TYPE *content
         fprintf(stderr, "Failed to extract SpcIndirectDataContent data\n");
         return 1; /* FAILED */
     }
-    if (idc->messageDigest && idc->messageDigest->digest && idc->messageDigest->digestAlgorithm) {
-        /* get a digest algorithm a message digest of the file from the content */
-        mdtype = OBJ_obj2nid(idc->messageDigest->digestAlgorithm->algorithm);
-        memcpy(mdbuf, idc->messageDigest->digest->data, (size_t)idc->messageDigest->digest->length);
-    }
-    if (mdtype == -1) {
-        fprintf(stderr, "Failed to extract current message digest\n\n");
+    if (spc_indirect_data_content_get_digest(idc, mdbuf, &mdtype) < 0) {
+        fprintf(stderr, "Failed to extract message digest from signature\n\n");
         SpcIndirectDataContent_free(idc);
         return 1; /* FAILED */
     }
@@ -4437,19 +4431,15 @@ static int ui_read(UI *ui, UI_STRING *uis)
 }
 
 static UI_METHOD *ui_osslsigncode(void) {
-    static UI_METHOD *ui_method=NULL;
+    UI_METHOD *ui = UI_create_method("osslsigncode UI");
 
-    if (ui_method) /* already initialized */
-        return ui_method;
-    ui_method = UI_create_method("osslsigncode UI");
-    if (!ui_method) {
-        return NULL;
+    if (ui) {
+        UI_method_set_opener(ui, UI_method_get_opener(UI_OpenSSL()));
+        UI_method_set_writer(ui, UI_method_get_writer(UI_OpenSSL()));
+        UI_method_set_reader(ui, ui_read);
+        UI_method_set_closer(ui, UI_method_get_closer(UI_OpenSSL()));
     }
-    UI_method_set_opener(ui_method, UI_method_get_opener(UI_OpenSSL()));
-    UI_method_set_writer(ui_method, UI_method_get_writer(UI_OpenSSL()));
-    UI_method_set_reader(ui_method, ui_read);
-    UI_method_set_closer(ui_method, UI_method_get_closer(UI_OpenSSL()));
-    return ui_method;
+    return ui;
 }
 
  /* store_type == 0 means here multiple types of credentials are to be loaded */
@@ -4460,7 +4450,7 @@ static void load_objects_from_store(const char *url, char *pass, EVP_PKEY **pkey
     if (!url)
         return;
 
-    store_ctx = OSSL_STORE_open(url, ui_osslsigncode(), pass, NULL, NULL);
+    store_ctx = OSSL_STORE_open(url, ui_method, pass, NULL, NULL);
     if (!store_ctx)
         return;
 
@@ -4561,7 +4551,6 @@ static void providers_cleanup(void)
 {
     sk_OSSL_PROVIDER_pop_free(providers, provider_free);
     providers = NULL;
-    UI_destroy_method(ui_osslsigncode());
 }
 
 static int provider_load(const char *pname)
@@ -5088,7 +5077,7 @@ static void engine_control_set(GLOBAL_OPTIONS *options, const char *arg)
 }
 #endif /* OPENSSL_NO_ENGINE */
 
-int main(int argc, char **argv)
+static int main_execute(int argc, char **argv)
 {
     FILE_FORMAT_CTX *ctx = NULL;
     GLOBAL_OPTIONS options;
@@ -5099,24 +5088,6 @@ int main(int argc, char **argv)
 
     /* reset options */
     memset(&options, 0, sizeof(GLOBAL_OPTIONS));
-
-    /* Set up OpenSSL */
-    if (!OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS
-        | OPENSSL_INIT_ADD_ALL_CIPHERS
-        | OPENSSL_INIT_ADD_ALL_DIGESTS
-        | OPENSSL_INIT_LOAD_CONFIG, NULL))
-        DO_EXIT_0("Failed to init crypto\n");
-
-    /* create some MS Authenticode OIDS we need later on */
-    if (!OBJ_create(SPC_STATEMENT_TYPE_OBJID, NULL, NULL)
-        /* PKCS9_COUNTER_SIGNATURE exists as OpenSSL OBJ_pkcs9_countersignature */
-        || !OBJ_create(MS_JAVA_SOMETHING, NULL, NULL)
-        || !OBJ_create(SPC_SP_OPUS_INFO_OBJID, NULL, NULL)
-        || !OBJ_create(SPC_NESTED_SIGNATURE_OBJID, NULL, NULL)
-        || !OBJ_create(SPC_UNAUTHENTICATED_DATA_BLOB_OBJID, NULL, NULL)
-        || !OBJ_create(SPC_RFC3161_OBJID, NULL, NULL)
-        || !OBJ_create(PKCS9_SEQUENCE_NUMBER, NULL, NULL))
-        DO_EXIT_0("Failed to create objects\n");
 
     /* commands and options initialization */
     if (!main_configure(argc, argv, &options))
@@ -5362,6 +5333,37 @@ err_cleanup:
     else
         printf(ret ? "Failed\n" : "Succeeded\n");
     free_options(&options);
+    return ret;
+}
+
+int main(int argc, char **argv)
+{
+    int ret = -1;
+
+    /* one-time OpenSSL initialization */
+    if (!OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS
+        | OPENSSL_INIT_ADD_ALL_CIPHERS
+        | OPENSSL_INIT_ADD_ALL_DIGESTS
+        | OPENSSL_INIT_LOAD_CONFIG, NULL))
+        DO_EXIT_0("Failed to init crypto\n");
+
+    /* create some MS Authenticode OIDS we need later on */
+    if (!OBJ_create(SPC_STATEMENT_TYPE_OBJID, NULL, NULL)
+        /* PKCS9_COUNTER_SIGNATURE exists as OpenSSL OBJ_pkcs9_countersignature */
+        || !OBJ_create(MS_JAVA_SOMETHING, NULL, NULL)
+        || !OBJ_create(SPC_SP_OPUS_INFO_OBJID, NULL, NULL)
+        || !OBJ_create(SPC_NESTED_SIGNATURE_OBJID, NULL, NULL)
+        || !OBJ_create(SPC_UNAUTHENTICATED_DATA_BLOB_OBJID, NULL, NULL)
+        || !OBJ_create(SPC_RFC3161_OBJID, NULL, NULL)
+        || !OBJ_create(PKCS9_SEQUENCE_NUMBER, NULL, NULL))
+        DO_EXIT_0("Failed to create objects\n");
+
+    /* perform the requested operation */
+    ui_method = ui_osslsigncode();
+    ret = main_execute(argc, argv);
+    UI_destroy_method(ui_method);
+
+err_cleanup:
     return ret;
 }
 

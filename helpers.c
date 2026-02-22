@@ -565,6 +565,37 @@ int compare_digests(u_char *mdbuf, u_char *cmdbuf, int mdtype)
 }
 
 /*
+ * Safely extract digest from SpcIndirectDataContent with bounds checking.
+ * This function validates that the digest length from the ASN.1 structure
+ * does not exceed the destination buffer size, preventing buffer overflows
+ * from maliciously crafted signatures.
+ * [in] idc: parsed SpcIndirectDataContent structure
+ * [out] mdbuf: output buffer (must be at least EVP_MAX_MD_SIZE bytes)
+ * [out] mdtype: digest algorithm NID
+ * [returns] digest length on success, -1 on error
+ */
+int spc_indirect_data_content_get_digest(SpcIndirectDataContent *idc, u_char *mdbuf, int *mdtype)
+{
+    int digest_len;
+
+    if (!idc || !idc->messageDigest || !idc->messageDigest->digest ||
+        !idc->messageDigest->digestAlgorithm) {
+        return -1; /* FAILED */
+    }
+    digest_len = idc->messageDigest->digest->length;
+
+    /* Validate digest length to prevent buffer overflow */
+    if (digest_len <= 0 || digest_len > EVP_MAX_MD_SIZE) {
+        fprintf(stderr, "Invalid digest length in signature: %d (expected 1-%d)\n",
+                digest_len, EVP_MAX_MD_SIZE);
+        return -1; /* FAILED */
+    }
+    *mdtype = OBJ_obj2nid(idc->messageDigest->digestAlgorithm->algorithm);
+    memcpy(mdbuf, idc->messageDigest->digest->data, (size_t)digest_len);
+    return digest_len; /* OK */
+}
+
+/*
  * Helper functions
  */
 
@@ -619,6 +650,10 @@ static int spc_indirect_data_content_create(u_char **blob, int *len, FILE_FORMAT
     idc->data->value->type = V_ASN1_SEQUENCE;
     idc->data->value->value.sequence = ASN1_STRING_new();
     idc->data->type = ctx->format->data_blob_get(&p, &l, ctx);
+    if (!idc->data->type) {
+        SpcIndirectDataContent_free(idc);
+        return 0; /* FAILED */
+    }
     idc->data->value->value.sequence->data = p;
     idc->data->value->value.sequence->length = l;
     idc->messageDigest->digestAlgorithm->algorithm = OBJ_nid2obj(mdtype);

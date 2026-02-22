@@ -342,9 +342,10 @@ static int cab_verify_digests(FILE_FORMAT_CTX *ctx, PKCS7 *p7)
         const u_char *p = content_val->data;
         SpcIndirectDataContent *idc = d2i_SpcIndirectDataContent(NULL, &p, content_val->length);
         if (idc) {
-            if (idc->messageDigest && idc->messageDigest->digest && idc->messageDigest->digestAlgorithm) {
-                mdtype = OBJ_obj2nid(idc->messageDigest->digestAlgorithm->algorithm);
-                memcpy(mdbuf, idc->messageDigest->digest->data, (size_t)idc->messageDigest->digest->length);
+            if (spc_indirect_data_content_get_digest(idc, mdbuf, &mdtype) < 0) {
+                fprintf(stderr, "Failed to extract message digest from signature\n\n");
+                SpcIndirectDataContent_free(idc);
+                return 0; /* FAILED */
             }
             SpcIndirectDataContent_free(idc);
         }

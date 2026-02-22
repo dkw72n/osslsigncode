@@ -1,6 +1,44 @@
 # osslsigncode change log
 
-### 2.11 (unreleased)
+### 2.14 (unreleased)
+
+### 2.13 (2026.02.10)
+
+**MULTIPLE SECURITY VULNERABILITIES**
+
+This release includes important security fixes. Users are strongly encouraged
+to upgrade, as the issues below may be exploitable when processing untrusted
+files.
+
+- fixed integer overflows when processing APPX compressed data streams
+  (by Małgorzata Olszówka)
+- fixed double-free vulnerabilities in APPX file processing
+  (by Małgorzata Olszówka)
+- fixed multiple memory corruption issues in PE page hash computation
+  (by Antoni Klajn (Opera) and Małgorzata Olszówka)
+
+### 2.12 (2026.02.02)
+
+**CRITICAL SECURITY VULNERABILITY**
+
+This release fixes a critical memory corruption vulnerability.  A malicious
+attacker could create a signed file, which, when verified with osslsigncode,
+triggers arbitrary code execution.  Any previous version of osslsigncode should
+be immediately upgraded if the tool is used for verification of untrusted
+files.
+
+- fixed a buffer overflow while extracting message digests
+  (reported and fixed by Antoni Klajn, Opera)
+
+### 2.11 (2026.01.20)
+- added keyUsage validation for signer certificate
+  (thanks to Hanqing Zhao and Zi-Quan You for reporting the issue)
+- added printing CRL details during signature verification
+- implemented a workaround for CRL servers returning the HTTP Content-Type
+  header other than application/pkix-crl (thanks to Chris Thibodeaux)
+- fixed HTTP keep-alive handling
+- fixed macOS compiler and linker flags
+- fixed undefined BIO_get_fp() behavior with BIO_FLAGS_UPLINK_INTERNAL
 
 ### 2.10 (2025.06.23)
 

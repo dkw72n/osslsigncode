@@ -163,8 +163,10 @@ static ASN1_OBJECT *pe_spc_image_data_get(u_char **p, int *plen, FILE_FORMAT_CTX
         if (EVP_MD_size(ctx->options->md) > EVP_MD_size(EVP_sha1()))
             phtype = NID_sha256;
         link = pe_page_hash_link_get(ctx, phtype);
-        if (!link)
+        if (!link) {
+            SpcPeImageData_free(pid);
             return NULL; /* FAILED */
+        }
         pid->file = link;
     } else {
         pid->file = spc_link_obsolete_get();
@@ -255,9 +257,11 @@ static int pe_verify_digests(FILE_FORMAT_CTX *ctx, PKCS7 *p7)
                 SpcIndirectDataContent_free(idc);
                 return 0; /* FAILED */
             }
-            if (idc->messageDigest && idc->messageDigest->digest && idc->messageDigest->digestAlgorithm) {
-                mdtype = OBJ_obj2nid(idc->messageDigest->digestAlgorithm->algorithm);
-                memcpy(mdbuf, idc->messageDigest->digest->data, (size_t)idc->messageDigest->digest->length);
+            if (spc_indirect_data_content_get_digest(idc, mdbuf, &mdtype) < 0) {
+                fprintf(stderr, "Failed to extract message digest from signature\n\n");
+                OPENSSL_free(ph);
+                SpcIndirectDataContent_free(idc);
+                return 0; /* FAILED */
             }
             SpcIndirectDataContent_free(idc);
         }
@@ -402,6 +406,7 @@ static PKCS7 *pe_pkcs7_signature_new(FILE_FORMAT_CTX *ctx, BIO *hash)
     content = spc_indirect_data_content_get(hash, ctx);
     if (!content) {
         fprintf(stderr, "Failed to get spcIndirectDataContent\n");
+        PKCS7_free(p7);
         return NULL; /* FAILED */
     }
     if (!sign_spc_indirect_data_content(p7, content)) {
@@ -914,12 +919,25 @@ static u_char *pe_page_hash_calc(int *rphlen, FILE_FORMAT_CTX *ctx, int phtype)
     uint16_t nsections, opthdr_size;
     uint32_t alignment, pagesize, hdrsize;
     uint32_t rs, ro, l, lastpos = 0;
-    int pphlen, phlen, i, pi = 1;
-    size_t written;
-    u_char *res, *zeroes;
+    int mdlen, pphlen, phlen, i, pi = 1;
+    size_t written, off, sect_off, sect_tbl, need;
+    u_char *res = NULL, *zeroes = NULL;
     char *sections;
     const EVP_MD *md = EVP_get_digestbynid(phtype);
-    BIO *bhash;
+    BIO *bhash = NULL;
+    uint32_t filebound;
+    size_t pphlen_sz, sections_factor;
+
+    if (rphlen == NULL || ctx == NULL || ctx->options == NULL || ctx->pe_ctx == NULL
+        || ctx->options->indata == NULL)
+        return NULL;
+
+    if (md == NULL)
+        return NULL;
+
+    mdlen = EVP_MD_size(md);
+    if (mdlen <= 0)
+        return NULL;
 
     /* NumberOfSections indicates the size of the section table,
      * which immediately follows the headers, can be up to 65535 under Vista and later */
@@ -961,10 +979,46 @@ static u_char *pe_page_hash_calc(int *rphlen, FILE_FORMAT_CTX *ctx, int phtype)
         fprintf(stderr, "Corrupted optional header size: 0x%08X\n", opthdr_size);
         return NULL; /* FAILED */
     }
-    pphlen = 4 + EVP_MD_size(md);
-    phlen = pphlen * (3 + (int)nsections + (int)(ctx->pe_ctx->fileend / pagesize));
+    /* Validate that pagesize >= hdrsize to prevent integer underflow */
+    if (pagesize < hdrsize) {
+        fprintf(stderr, "Page size (0x%08X) is smaller than header size (0x%08X)\n",
+                pagesize, hdrsize);
+        return NULL; /* FAILED */
+    }
+    pphlen = 4 + mdlen;
+
+    /* Compute an upper bound for result size and guard overflow */
+    pphlen_sz = (size_t)pphlen;
+    sections_factor = 3 + (size_t)nsections + ((size_t)ctx->pe_ctx->fileend / pagesize);
+    if (sections_factor > SIZE_MAX / pphlen_sz) {
+        fprintf(stderr, "Page hash allocation size would overflow\n");
+        return NULL; /* FAILED */
+    }
+    phlen = (int)(pphlen_sz * sections_factor);
+    /* Sanity limit - page hash shouldn't exceed reasonable size (16 MB) */
+    if (phlen < 0 || (size_t)phlen > SIZE_16M) {
+        fprintf(stderr, "Page hash size exceeds limit: %d\n", phlen);
+        return NULL; /* FAILED */
+    }
+
+    /* Determine the file boundary for section data validation */
+    filebound = ctx->pe_ctx->sigpos ? ctx->pe_ctx->sigpos : ctx->pe_ctx->fileend;
+
+    /* Validate section table bounds before reading section headers */
+    sect_off = (size_t)ctx->pe_ctx->header_size + 24u + (size_t)opthdr_size;
+    sect_tbl = (size_t)nsections * 40u;
+
+    if (sect_off > (size_t)filebound || sect_tbl > (size_t)filebound - sect_off) {
+        fprintf(stderr, "Section table out of bounds: off=%zu size=%zu filebound=%u\n",
+            sect_off, sect_tbl, filebound);
+        return NULL; /* FAILED */
+    }
+    sections = (char *)ctx->options->indata + sect_off;
 
     bhash = BIO_new(BIO_f_md());
+    if (bhash == NULL)
+        return NULL;
+
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-qual"
@@ -977,7 +1031,10 @@ static u_char *pe_page_hash_calc(int *rphlen, FILE_FORMAT_CTX *ctx, int phtype)
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
-    BIO_push(bhash, BIO_new(BIO_s_null()));
+    if (BIO_push(bhash, BIO_new(BIO_s_null())) == NULL) {
+        BIO_free_all(bhash);
+        return NULL;
+    }
     if (!BIO_write_ex(bhash, ctx->options->indata, ctx->pe_ctx->header_size + 88, &written)
         || written != ctx->pe_ctx->header_size + 88) {
         BIO_free_all(bhash);
@@ -989,36 +1046,84 @@ static u_char *pe_page_hash_calc(int *rphlen, FILE_FORMAT_CTX *ctx, int phtype)
         BIO_free_all(bhash);
         return NULL;  /* FAILED */
     }
-    if (!BIO_write_ex(bhash,
-        ctx->options->indata + ctx->pe_ctx->header_size + 160 + ctx->pe_ctx->pe32plus*16,
-        hdrsize - (ctx->pe_ctx->header_size + 160 + ctx->pe_ctx->pe32plus*16), &written)
-        || written != hdrsize - (ctx->pe_ctx->header_size + 160 + ctx->pe_ctx->pe32plus*16)) {
+    off = ctx->pe_ctx->header_size + 160 + (size_t)ctx->pe_ctx->pe32plus * 16;
+    if (hdrsize < off || hdrsize > filebound) {
+        BIO_free_all(bhash);
+        return NULL;  /* FAILED: header too small */
+    }
+    if (!BIO_write_ex(bhash, ctx->options->indata + off, (size_t)hdrsize - off, &written)
+        || written != hdrsize - off) {
         BIO_free_all(bhash);
         return NULL;  /* FAILED */
     }
+    if (pagesize < hdrsize) {
+        BIO_free_all(bhash);
+        return NULL;  /* FAILED: header larger than page */
+    }
     zeroes = OPENSSL_zalloc((size_t)pagesize);
-    if (!BIO_write_ex(bhash, zeroes, pagesize - hdrsize, &written)
-        || written != pagesize - hdrsize) {
+    if (zeroes == NULL) {
+        BIO_free_all(bhash);
+        return NULL;  /* FAILED */
+    }
+    if (!BIO_write_ex(bhash, zeroes, (size_t)pagesize - (size_t)hdrsize, &written)
+        || written != (size_t)pagesize - (size_t)hdrsize) {
         BIO_free_all(bhash);
         OPENSSL_free(zeroes);
         return NULL;  /* FAILED */
     }
     res = OPENSSL_malloc((size_t)phlen);
+    if (res == NULL) {
+        BIO_free_all(bhash);
+        OPENSSL_free(zeroes);
+        return NULL;  /* FAILED */
+    }
     memset(res, 0, 4);
-    BIO_gets(bhash, (char*)res + 4, EVP_MD_size(md));
+    if (BIO_gets(bhash, (char *)res + 4, mdlen) != mdlen) {
+        BIO_free_all(bhash);
+        OPENSSL_free(zeroes);
+        OPENSSL_free(res);
+        return NULL;  /* FAILED */
+    }
     BIO_free_all(bhash);
-    sections = ctx->options->indata + ctx->pe_ctx->header_size + 24 + opthdr_size;
-    for (i=0; i<nsections; i++) {
-        /* Resource Table address and size */
+    bhash = NULL;
+
+    for (i = 0; i < (int)nsections; i++) {
+        /* SizeOfRawData and PointerToRawData from section header */
         rs = GET_UINT32_LE(sections + 16);
         ro = GET_UINT32_LE(sections + 20);
-        if (rs == 0 || rs >= UINT32_MAX) {
+        if (rs == 0) {
             sections += 40;
             continue;
         }
-        for (l=0; l<rs; l+=pagesize, pi++) {
-            PUT_UINT32_LE(ro + l, res + pi*pphlen);
+        /* Validate section bounds against file size to prevent OOB read */
+        if (ro >= filebound || rs > filebound - ro) {
+            fprintf(stderr, "Section %d has invalid bounds: offset=0x%08X, size=0x%08X, fileend=0x%08X\n",
+                    i, ro, rs, filebound);
+            OPENSSL_free(zeroes);
+            OPENSSL_free(res);
+            return NULL; /* FAILED */
+        }
+        for (l = 0; l < rs; l += pagesize, pi++) {
+            need = (size_t)(pi + 1) * (size_t)pphlen;
+
+            /* Prevent OOB write into res if pi grows beyond allocated factor */
+            if (need > (size_t)phlen) {
+                fprintf(stderr, "Page hash buffer overflow prevented: pi=%d need=%zu phlen=%d\n",
+                    pi, need, phlen);
+                OPENSSL_free(zeroes);
+                OPENSSL_free(res);
+                return NULL; /* FAILED */
+            }
+
+            PUT_UINT32_LE(ro + l, res + (size_t)pi * (size_t)pphlen);
+
             bhash = BIO_new(BIO_f_md());
+            if (bhash == NULL) {
+                OPENSSL_free(zeroes);
+                OPENSSL_free(res);
+                return NULL;
+            }
+
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-qual"
@@ -1033,17 +1138,24 @@ static u_char *pe_page_hash_calc(int *rphlen, FILE_FORMAT_CTX *ctx, int phtype)
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
-            BIO_push(bhash, BIO_new(BIO_s_null()));
-            if (rs - l < pagesize) {
-                if (!BIO_write_ex(bhash, ctx->options->indata + ro + l, rs - l, &written)
-                    || written != rs - l) {
+            if (BIO_push(bhash, BIO_new(BIO_s_null())) == NULL) {
+                BIO_free_all(bhash);
+                OPENSSL_free(zeroes);
+                OPENSSL_free(res);
+                return NULL;
+            }
+            if (l < rs && rs - l < pagesize) {
+                size_t tail = (size_t)(rs - l);
+
+                if (!BIO_write_ex(bhash, ctx->options->indata + ro + l, tail, &written)
+                    || written != tail) {
                     BIO_free_all(bhash);
                     OPENSSL_free(zeroes);
                     OPENSSL_free(res);
                     return NULL;  /* FAILED */
                 }
-                if (!BIO_write_ex(bhash, zeroes, pagesize - (rs - l), &written)
-                    || written != pagesize - (rs - l)) {
+                if (!BIO_write_ex(bhash, zeroes, pagesize - tail, &written)
+                    || written != pagesize - tail) {
                     BIO_free_all(bhash);
                     OPENSSL_free(zeroes);
                     OPENSSL_free(res);
@@ -1058,17 +1170,35 @@ static u_char *pe_page_hash_calc(int *rphlen, FILE_FORMAT_CTX *ctx, int phtype)
                     return NULL;  /* FAILED */
                 }
             }
-            BIO_gets(bhash, (char*)res + pi*pphlen + 4, EVP_MD_size(md));
+            if (BIO_gets(bhash, (char *)res + (size_t)pi * (size_t)pphlen + 4, mdlen) != mdlen) {
+                BIO_free_all(bhash);
+                OPENSSL_free(zeroes);
+                OPENSSL_free(res);
+                return NULL;  /* FAILED */
+            }
             BIO_free_all(bhash);
+            bhash = NULL;
         }
         lastpos = ro + rs;
         sections += 40;
     }
-    PUT_UINT32_LE(lastpos, res + pi*pphlen);
-    memset(res + pi*pphlen + 4, 0, (size_t)EVP_MD_size(md));
+    /* Final entry */
+    need = (size_t)(pi + 1) * (size_t)pphlen;
+
+    if (need > (size_t)phlen) {
+        fprintf(stderr, "Page hash buffer overflow prevented at final entry: pi=%d need=%zu phlen=%d\n",
+            pi, need, phlen);
+        OPENSSL_free(zeroes);
+        OPENSSL_free(res);
+        return NULL; /* FAILED */
+    }
+
+    PUT_UINT32_LE(lastpos, res + (size_t)pi * (size_t)pphlen);
+    memset(res + (size_t)pi * (size_t)pphlen + 4, 0, (size_t)mdlen);
     pi++;
+
     OPENSSL_free(zeroes);
-    *rphlen = pi*pphlen;
+    *rphlen = pi * pphlen;
     return res;
 }
 
@@ -1088,6 +1218,10 @@ static int pe_verify_page_hash(FILE_FORMAT_CTX *ctx, u_char *ph, int phlen, int 
     if (!ph)
         return 1; /* OK */
     cph = pe_page_hash_calc(&cphlen, ctx, phtype);
+    if (!cph) {
+        fprintf(stderr, "Page hash verification failed: could not calculate page hash\n");
+        return 0; /* FAILED */
+    }
     mdok = (phlen == cphlen) && !memcmp(ph, cph, (size_t)phlen);
     printf("Page hash algorithm  : %s\n", OBJ_nid2sn(phtype));
     if (ctx->options->verbose) {
@@ -1190,7 +1324,8 @@ static int pe_check_file(FILE_FORMAT_CTX *ctx)
 {
     uint32_t real_pe_checksum, sum = 0;
 
-    if (!ctx) {
+    if (ctx == NULL || ctx->pe_ctx == NULL || ctx->options == NULL
+        || ctx->options->indata == NULL) {
         fprintf(stderr, "Init error\n");
         return 0; /* FAILED */
     }
@@ -1202,25 +1337,52 @@ static int pe_check_file(FILE_FORMAT_CTX *ctx)
         printf("Calculated PE checksum: %08X\n", real_pe_checksum);
         printf("Warning: invalid PE checksum\n");
     }
+    /* Signature directory bounds */
     if (ctx->pe_ctx->sigpos == 0 || ctx->pe_ctx->siglen == 0
-        || ctx->pe_ctx->sigpos > ctx->pe_ctx->fileend) {
+        || ctx->pe_ctx->sigpos > ctx->pe_ctx->fileend
+        || ctx->pe_ctx->siglen > ctx->pe_ctx->fileend - ctx->pe_ctx->sigpos) {
         fprintf(stderr, "No signature found\n");
         return 0; /* FAILED */
     }
     /*
+     * Validate WIN_CERTIFICATE chain.
      * If the sum of the rounded dwLength values does not equal the Size value,
      * then either the attribute certificate table or the Size field is corrupted.
      */
     while (sum < ctx->pe_ctx->siglen) {
-        uint32_t len = GET_UINT32_LE(ctx->options->indata + ctx->pe_ctx->sigpos + sum);
-        if (ctx->pe_ctx->siglen - len > 8) {
+        uint32_t len, off;
+
+        /* Prevent overflow in sigpos + sum */
+        if (sum > UINT32_MAX - ctx->pe_ctx->sigpos) {
             fprintf(stderr, "Corrupted attribute certificate table\n");
-            fprintf(stderr, "Attribute certificate table size  : %08X\n", ctx->pe_ctx->siglen);
-            fprintf(stderr, "Attribute certificate entry length: %08X\n\n", len);
             return 0; /* FAILED */
         }
-        /* quadword align data */
-        len += len % 8 ? 8 - len % 8 : 0;
+        off = ctx->pe_ctx->sigpos + sum;
+
+        /* Need at least 4 bytes to read dwLength */
+        if (off > ctx->pe_ctx->fileend || ctx->pe_ctx->fileend - off < 4) {
+            fprintf(stderr, "Corrupted attribute certificate table\n");
+            return 0; /* FAILED */
+        }
+        len = GET_UINT32_LE(ctx->options->indata + off);
+
+        /* dwLength must include the 8-byte WIN_CERTIFICATE header */
+        if (len < 8 || len > ctx->pe_ctx->siglen - sum || len > ctx->pe_ctx->fileend - off) {
+            fprintf(stderr, "Corrupted attribute certificate table\n");
+            return 0; /* FAILED */
+        }
+
+        /* Quadword align data */
+        if (len % 8) {
+            uint32_t pad = 8 - (len % 8);
+
+            /* Ensure quadword alignment does not overflow or exceed remaining table size */
+            if (pad > ctx->pe_ctx->siglen - sum - len) {
+                fprintf(stderr, "Corrupted attribute certificate table\n");
+                return 0; /* FAILED */
+            }
+            len += pad;
+        }
         sum += len;
     }
     if (sum != ctx->pe_ctx->siglen) {
